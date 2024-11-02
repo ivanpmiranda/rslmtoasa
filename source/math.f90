@@ -2236,5 +2236,196 @@ contains
       matrix(3, 3) = cosTheta + uz*uz*(1.0 - cosTheta)
    end subroutine
 
+   !> Given the arrays x(:) and f(:) of size n of a tabulated function
+   !> yi = f(xi), calculates the coefficients a, b, c, and d of the cubic spline
+   !> Implemented by Ivan Miranda on 02.11.2024
+   function cubic_spline_coeffs(x, f) result(coef)
+      real(rp), intent(in) :: x(:), f(:)
+      real(rp), dimension(size(x,1), 4) :: coef ! the a, b, c, and d coefficients
+
+      ! Local variables
+      real(rp), allocatable, dimension(:) :: h, alpha, l, mu, z
+      integer :: i
+
+      ! Initial definition
+      coef(:,:) = 0.0_rp
+
+      ! Allocations
+      allocate(h(size(x,1)-1))
+      allocate(alpha(size(x,1)-1))
+      allocate(l(size(x,1)))
+      allocate(mu(size(x,1)-1))
+      allocate(z(size(x,1)))
+
+      ! Computes h and alpha
+      do i = 1, size(x,1) - 1
+         h(i) = x(i+1) - x(i)
+      end do
+      do i = 2, size(x,1) - 1
+         alpha(i) = 3.0_rp*(f(i+1)-f(i))/h(i) - 3.0_rp*(f(i)-f(i-1))/h(i-1)
+      end do
+
+      ! Set up the tridiagonal system
+      l(1) = 1.0_rp ; mu(1) = 0.0_rp ; z(1) = 0.0_rp 
+      do i = 2, size(x,1) - 1
+         l(i) = 2.0_rp*(x(i+1)-x(i-1)) - h(i-1)*mu(i-1)
+         mu(i) = h(i)/l(i)
+         z(i) = (alpha(i)-h(i-1)*z(i-1))/l(i)
+      end do
+      l(size(x,1)) = 1.0_rp ; z(size(x,1)) = 0.0_rp ; coef(size(x,1),3) = 0.0_rp
+
+      ! Now the back substitution to find the coefficients
+      do i = size(x,1)-1, 1, -1
+         coef(i,3) = z(i)-mu(i)*coef(i+1,3)
+         coef(i,2) = (f(i+1)-f(i))/h(i) - h(i)*(coef(i+1,3)+2.0_rp*coef(i,3))/3.0_rp
+         coef(i,4) = (coef(i+1,3)-coef(i,3))/(3.0_rp*h(i))
+         coef(i,1) = f(i)
+      end do
+
+      coef(size(x,1),1) = f(size(x,1))
+
+      ! Deallocations
+      deallocate(alpha, l, mu, z, h)
+
+   end function cubic_spline_coeffs
+
+   !> Given the arrays x(:) and f(:) of size n of a tabulated function
+   !> yi = f(xi), calculates the expected value of the function
+   !> at the point xi = xp given by the user, following the cubic spline
+   !> Implemented by Ivan Miranda on 02.11.2024
+   function cubic_spline_interp_point(x, f, xp) result(fp)
+      real(rp), intent(in) :: x(:), f(:)
+      real(rp), intent(in) :: xp ! the point of interest
+      real(rp) :: fp ! the value of the function at the given point xp (fp = f(xp))
+
+      ! Local variables
+      integer :: i
+      real(rp), dimension(size(x,1),4) :: coef
+
+      ! Compute the coefficients
+      coef = cubic_spline_coeffs(x, f)
+
+      ! Find the interval [x(i), x(i+1)] that contains the point xp
+      do i = 1, size(x,1)-1
+         if (xp >= x(i) .and. xp <= x(i+1)) exit
+      end do
+
+      ! Ensure i is within a valid range
+      if (i > size(x,1)-1) then
+         i = size(x,1)-1
+      else if (i < 1) then
+         i = 1
+      end if
+
+      ! Interpolate at xp
+      fp = coef(i,1) + coef(i,2)*(xp-x(i)) + coef(i,3)*(xp-x(i))**2 + &
+           coef(i,4)*(xp-x(i))**3
+           
+   end function cubic_spline_interp_point
+
+   !> Given the arrays x(:) and f(:) of size n of a tabulated function
+   !> yi = f(xi), returns an interpolated curve with the number of points
+   !> requested.
+   !> Implemented by Ivan Miranda on 02.11.2024
+   function cubic_spline_interp(x, f, num_points) result(finterp)
+      real(rp), intent(in) :: x(:), f(:)
+      integer, intent(in) :: num_points ! number of points to return
+      real(rp) :: finterp(num_points, 2) ! the function out
+
+      ! Local variables
+      integer :: i, j
+      real(rp), dimension(num_points) :: xinterp
+      real(rp), dimension(size(x,1),4) :: coef
+      real(rp) :: step
+
+      ! Initial definition
+      finterp = 0.0_rp
+
+      ! Define the interval xinterp
+      step = (x(size(x,1))-x(1))/(num_points-1)
+      do i = 1, num_points
+         xinterp(i) = x(1) + (i-1)*step
+         finterp(i,1) = xinterp(i)
+      end do
+
+      ! Calculate the coefficients
+      coef = cubic_spline_coeffs(x, f)
+
+      ! Interpolate over all points in xinterp
+      do i = 1, num_points
+         do while (j <= size(x,1)-1 .and. xinterp(i) > x(j+1))
+            j = j + 1
+         end do
+
+         ! Ensure j is within valid range
+         if (j >= size(x,1)) then
+            j = size(x,1) - 1
+         end if
+         
+         finterp(i,2) = coef(j,1) + coef(j,2)*(xinterp(i)-x(j)) + &
+                        coef(j,3)*(xinterp(i)-x(j))**2 + &
+                        coef(j,4)*(xinterp(i)-x(j))**3
+
+      end do
+
+   end function cubic_spline_interp
+
+   !> Solve the Poisson equation of the form ∇^2(phi(r)) = f(r)
+   !> on a sphere considering boundary conditions by Cartesian
+   !> finite differences method. Implemented by Ivan Miranda on 31.10.2024
+   !subroutine poisson(phi, f, tol, num_points, radius)
+   !   ! Input variables
+   !   ! f: is the function f(r) and its value over all r points (vector of size (:,2))
+   !   ! where the first entry is for the r elements and the second is for the value of the function f
+   !   ! phi: the output function with size (:,:,:) in x,y,z coordinates
+   !   ! tol: relative tolerance for the relaxation of the function
+   !   ! num_points: number of points to discretize the x, y, and z directions
+   !   ! radius: radius of the atomic sphere
+   !   real(rp), intent(in) :: f(:,:)
+   !   real(rp), intent(out), allocatable :: phi(:,:,:)
+   !   real(rp), intent(in) :: tol, radius
+   !   integer, intent(in) :: num_points
+!
+   !   ! Local variables
+   !   integer :: i, j, k
+   !   real(rp) :: h ! the step
+   !   real(rp) :: tolerance ! absolute tolerance
+   !   real(rp) :: delta_max, epsilon, phi_old
+!
+   !   ! Stablishing the initial phi with boundary conditions
+   !   phi = 0.0_rp
+!
+   !   ! Calculate the absolute tolerance
+   !   tolerance = tol * maxval(abs(f(:,2)))
+!
+   !   ! Calculate the step size based on the radius of the sphere
+   !   h = radius/(1.0_rp*num_points - 1.0_rp)
+!
+   !   ! Now convert the function f(r) (r scalar) in a function of f(x,y,z)
+   !   ! To do that, we first need to interpolate the function to get a high resolution of r
+   !   ! I use here spline interpolation
+   !   
+   !   
+   !   delta_max = (1.0_rp + tolerance) ! just to enter the loop
+   !   do while (delta_max > tolerance)
+   !        delta_max = 0.0_rp
+   !        do i = 2, size(phi, 1) - 1
+   !           do j = 2, size(phi, 2) - 1
+   !              do k = 2, size(phi, 3) - 1
+   !                 phi_old = phi(i,j,k)
+   !                 phi(i,j,k) = (1.0_rp/6.0_rp)*(phi(i+1,j,k)+phi(i-1,j,k)+phi(i,j+1,k)+&
+   !                                               phi(i,j-1,k)+phi(i,j,k+1)+phi(i,j,k-1)-&
+   !                                               (h**2)*f(i,j,k))
+   !                 epsilon = abs(phi(i,j,k) - phi_old)
+   !                 if (epsilon.gt.delta_max) then
+   !                     delta_max = epsilon
+   !                 end if                
+   !              end do
+   !           end do
+   !        end do
+   !   end do
+!
+   !end subroutine poisson
+
 end module math_mod
 
