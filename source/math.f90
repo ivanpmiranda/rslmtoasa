@@ -2320,7 +2320,7 @@ contains
       ! Interpolate at xp
       fp = coef(i,1) + coef(i,2)*(xp-x(i)) + coef(i,3)*(xp-x(i))**2 + &
            coef(i,4)*(xp-x(i))**3
-           
+
    end function cubic_spline_interp_point
 
    !> Given the arrays x(:) and f(:) of size n of a tabulated function
@@ -2353,18 +2353,12 @@ contains
 
       ! Interpolate over all points in xinterp
       do i = 1, num_points
-         do while (j <= size(x,1)-1 .and. xinterp(i) > x(j+1))
-            j = j + 1
-         end do
-
-         ! Ensure j is within valid range
-         if (j >= size(x,1)) then
-            j = size(x,1) - 1
-         end if
-         
-         finterp(i,2) = coef(j,1) + coef(j,2)*(xinterp(i)-x(j)) + &
-                        coef(j,3)*(xinterp(i)-x(j))**2 + &
-                        coef(j,4)*(xinterp(i)-x(j))**3
+            do j = 1, size(x,1)-1
+                if (xinterp(i) >= x(j) .and. xinterp(i) <= x(j+1)) exit
+            end do
+            finterp(i,2) = coef(j,1) + coef(j,2)*(xinterp(i)-x(j)) + &
+                           coef(j,3)*(xinterp(i)-x(j))**2 + &
+                           coef(j,4)*(xinterp(i)-x(j))**3
 
       end do
 
@@ -2373,59 +2367,134 @@ contains
    !> Solve the Poisson equation of the form ∇^2(phi(r)) = f(r)
    !> on a sphere considering boundary conditions by Cartesian
    !> finite differences method. Implemented by Ivan Miranda on 31.10.2024
-   !subroutine poisson(phi, f, tol, num_points, radius)
-   !   ! Input variables
-   !   ! f: is the function f(r) and its value over all r points (vector of size (:,2))
-   !   ! where the first entry is for the r elements and the second is for the value of the function f
-   !   ! phi: the output function with size (:,:,:) in x,y,z coordinates
-   !   ! tol: relative tolerance for the relaxation of the function
-   !   ! num_points: number of points to discretize the x, y, and z directions
-   !   ! radius: radius of the atomic sphere
-   !   real(rp), intent(in) :: f(:,:)
-   !   real(rp), intent(out), allocatable :: phi(:,:,:)
-   !   real(rp), intent(in) :: tol, radius
-   !   integer, intent(in) :: num_points
-!
-   !   ! Local variables
-   !   integer :: i, j, k
-   !   real(rp) :: h ! the step
-   !   real(rp) :: tolerance ! absolute tolerance
-   !   real(rp) :: delta_max, epsilon, phi_old
-!
-   !   ! Stablishing the initial phi with boundary conditions
-   !   phi = 0.0_rp
-!
-   !   ! Calculate the absolute tolerance
-   !   tolerance = tol * maxval(abs(f(:,2)))
-!
-   !   ! Calculate the step size based on the radius of the sphere
-   !   h = radius/(1.0_rp*num_points - 1.0_rp)
-!
-   !   ! Now convert the function f(r) (r scalar) in a function of f(x,y,z)
-   !   ! To do that, we first need to interpolate the function to get a high resolution of r
-   !   ! I use here spline interpolation
-   !   
-   !   
-   !   delta_max = (1.0_rp + tolerance) ! just to enter the loop
-   !   do while (delta_max > tolerance)
-   !        delta_max = 0.0_rp
-   !        do i = 2, size(phi, 1) - 1
-   !           do j = 2, size(phi, 2) - 1
-   !              do k = 2, size(phi, 3) - 1
-   !                 phi_old = phi(i,j,k)
-   !                 phi(i,j,k) = (1.0_rp/6.0_rp)*(phi(i+1,j,k)+phi(i-1,j,k)+phi(i,j+1,k)+&
-   !                                               phi(i,j-1,k)+phi(i,j,k+1)+phi(i,j,k-1)-&
-   !                                               (h**2)*f(i,j,k))
-   !                 epsilon = abs(phi(i,j,k) - phi_old)
-   !                 if (epsilon.gt.delta_max) then
-   !                     delta_max = epsilon
-   !                 end if                
-   !              end do
-   !           end do
-   !        end do
-   !   end do
-!
-   !end subroutine poisson
+   subroutine poisson(phi, f, tol, num_points, radius)
+      ! Input variables
+      ! f: is the function f(r) and its value over all r points (vector of size (:,2))
+      ! where the first entry is for the r elements and the second is for the value of the function f
+      ! phi: the output function with size (:,:,:) in x,y,z coordinates
+      ! tol: relative tolerance for the relaxation of the function
+      ! num_points: number of points to discretize the x, y, and z directions
+      ! radius: radius of the atomic sphere
+      real(rp), intent(in) :: f(:,:)
+      real(rp), intent(out) :: phi(:,:,:)
+      real(rp), intent(in) :: tol, radius
+      integer, intent(in) :: num_points
+
+      ! Local variables
+      integer :: i, j, k, count
+      real(rp) :: h ! the step
+      real(rp) :: tolerance ! absolute tolerance
+      real(rp) :: delta_max, epsilon, phi_old, r_interp
+      real(rp), allocatable :: x(:,:,:), y(:,:,:), z(:,:,:) ! the grid
+      real(rp), allocatable :: fi(:,:,:) ! 3D array for f(x,y,z)
+      real(rp), allocatable :: lin(:)
+      real(rp), allocatable :: phi_output(:,:)
+      real(rp), parameter :: omega = 1.5 ! to apply the successive over-relaxation method
+
+      ! Allocations
+      allocate(x(num_points, num_points, num_points))
+      allocate(y(num_points, num_points, num_points))
+      allocate(z(num_points, num_points, num_points))
+      allocate(fi(num_points, num_points, num_points))
+      allocate(lin(num_points))
+
+      ! Stablishing the initial phi with boundary conditions
+      x = 0.0_rp ; y = 0.0_rp ; z = 0.0_rp
+      phi = 0.0_rp
+
+      ! Calculate the absolute tolerance
+      tolerance = tol * maxval(abs(f(:,2)))
+
+      ! Calculate the step size based on the radius of the sphere
+      h = 2.0_rp*radius/(1.0_rp*num_points - 1.0_rp)
+
+      ! Divide a 3D box between [-R,R] in all three directions
+
+      do i = 1, num_points
+         lin(i) = -radius + (i-1)*h
+      end do
+
+      count = 0
+      do i = 1, num_points ! x
+         do j = 1, num_points ! y
+            do k = 1, num_points ! z
+               x(i,j,k) = lin(i)
+               y(i,j,k) = lin(j)
+               z(i,j,k) = lin(k)
+
+               ! Check if the points are inside the sphere
+               r_interp = sqrt(x(i,j,k)**2 + y(i,j,k)**2 + z(i,j,k)**2)
+
+               if (r_interp <= radius) then
+                  fi(i,j,k) = cubic_spline_interp_point(f(:,1), f(:,2), r_interp)
+                  count = count + 1
+               else
+                  fi(i,j,k) = 0.0_rp ! set fi to zero outside the sphere
+               end if
+            end do
+         end do
+      end do
+
+      print *, 'count=', count
+
+      allocate(phi_output(count, 4))
+         
+      ! Now convert the function f(r) (r scalar) in a function of f(x,y,z)
+      ! To do that, we first need to interpolate the function to get a high resolution of r
+      ! I use here the cubic spline interpolation
+
+      delta_max = (1.0_rp + tolerance) ! just to enter the loop
+      do while (delta_max > tolerance)
+           delta_max = 0.0_rp
+           do i = 2, size(phi,1) - 1
+              do j = 2, size(phi,2) - 1
+                 do k = 2, size(phi,3) - 1
+                    phi_old = phi(i,j,k)
+                    phi(i,j,k) = omega*(1.0_rp/6.0_rp)*(phi(i+1,j,k)+phi(i-1,j,k)+phi(i,j+1,k)+&
+                                                  phi(i,j-1,k)+phi(i,j,k+1)+phi(i,j,k-1)-&
+                                                  (h**2)*fi(i,j,k)) + (1.0_rp-omega)*phi_old
+                    epsilon = abs(phi(i,j,k) - phi_old)
+                    if (epsilon.gt.delta_max) then
+                        delta_max = epsilon
+                    end if                
+                 end do
+              end do
+           end do
+           !print *, delta_max
+      end do
+
+      print *, 'finished!'
+
+      count = 1
+      do i = 1, num_points
+         do j = 1, num_points
+            do k = 1, num_points
+               r_interp = sqrt(x(i,j,k)**2 + y(i,j,k)**2 + z(i,j,k)**2)
+
+               if (r_interp <= radius) then
+                  phi_output(count, 1) = x(i,j,k)
+                  phi_output(count, 2) = y(i,j,k)
+                  phi_output(count, 3) = z(i,j,k)
+                  phi_output(count, 4) = phi(i,j,k)
+                  count = count + 1
+               end if
+            end do
+         end do
+      end do
+
+      print *, 'count2=', count
+      
+      open(unit=10, file='phi_output.dat', status='unknown')
+      do i = 1, count
+         write(10, *) phi_output(i,1), phi_output(i,2), phi_output(i,3), phi_output(i,4)
+      end do
+
+      print *, 'file written!'
+
+      ! Deallocations
+      deallocate(x, y, z, lin, fi)
+
+   end subroutine poisson
 
 end module math_mod
 
